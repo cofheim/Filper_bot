@@ -15,6 +15,10 @@ class Program
     private static List<Transaction> _transactions = new List<Transaction>();
     private static Dictionary<long, string> _userStates = new Dictionary<long, string>(); // Состояние пользователя
 
+    // Категории доходов и расходов
+    private static readonly List<string> IncomeCategories = new List<string> { "Зарплата", "Подарок", "Инвестиции", "Прочее" };
+    private static readonly List<string> ExpenseCategories = new List<string> { "Коммунальные услуги", "Продукты", "Развлечения", "Транспорт", "Прочее" };
+
     static async Task Main(string[] args)
     {
         // Замените "YOUR_BOT_TOKEN" на токен, который вы получили от BotFather
@@ -44,48 +48,105 @@ class Program
             // Логируем полученное сообщение
             Log($"Получено сообщение от пользователя {chatId}: {messageText}");
 
+            // Обработка команды "Меню" в любом состоянии
+            if (messageText == "Меню")
+            {
+                await ShowMainMenu(chatId, cancellationToken);
+                return;
+            }
+
             // Проверяем состояние пользователя
             if (_userStates.TryGetValue(chatId, out var state))
             {
-                if (decimal.TryParse(messageText, out var amount))
+                if (state.StartsWith("awaiting_category"))
                 {
-                    if (state == "awaiting_income")
+                    if (messageText == "Назад")
                     {
-                        _transactions.Add(new Transaction { Type = "Income", Amount = amount, Date = DateTime.Now });
-                        await botClient.SendTextMessageAsync(
-                            chatId: chatId,
-                            text: $"Доход на сумму {amount} руб. добавлен.",
-                            replyMarkup: GetMainKeyboard(), // Возвращаем основную клавиатуру
-                            cancellationToken: cancellationToken);
-
-                        // Логируем добавление дохода
-                        Log($"Добавлен доход: {amount} руб. (Пользователь: {chatId})");
-                    }
-                    else if (state == "awaiting_expense")
-                    {
-                        _transactions.Add(new Transaction { Type = "Expense", Amount = amount, Date = DateTime.Now });
-                        await botClient.SendTextMessageAsync(
-                            chatId: chatId,
-                            text: $"Расход на сумму {amount} руб. добавлен.",
-                            replyMarkup: GetMainKeyboard(), // Возвращаем основную клавиатуру
-                            cancellationToken: cancellationToken);
-
-                        // Логируем добавление расхода
-                        Log($"Добавлен расход: {amount} руб. (Пользователь: {chatId})");
+                        await ShowMainMenu(chatId, cancellationToken);
+                        return;
                     }
 
-                    // Сбрасываем состояние
-                    _userStates.Remove(chatId);
+                    var transactionType = state.Split('_')[2]; // "income" или "expense"
+                    var category = messageText;
+
+                    // Проверяем категорию с учётом регистра и пробелов
+                    var categories = transactionType == "income" ? IncomeCategories : ExpenseCategories;
+                    var cleanCategory = categories.FirstOrDefault(c => c.Trim().Equals(messageText.Trim(), StringComparison.OrdinalIgnoreCase));
+
+                    if (cleanCategory != null)
+                    {
+                        _userStates[chatId] = $"awaiting_amount_{transactionType}_{cleanCategory}";
+                        await botClient.SendTextMessageAsync(
+                            chatId: chatId,
+                            text: "Введите сумму:",
+                            replyMarkup: new ReplyKeyboardMarkup(new[] { new KeyboardButton("Назад") }) { ResizeKeyboard = true },
+                            cancellationToken: cancellationToken);
+
+                        // Логируем выбор категории
+                        Log($"Пользователь {chatId} выбрал категорию: {cleanCategory} ({transactionType})");
+                    }
+                    else
+                    {
+                        await botClient.SendTextMessageAsync(
+                            chatId: chatId,
+                            text: "Неверная категория. Попробуйте ещё раз.",
+                            replyMarkup: GetCategoriesKeyboard(transactionType),
+                            cancellationToken: cancellationToken);
+
+                        // Логируем ошибку выбора категории
+                        Log($"Ошибка: пользователь {chatId} выбрал неверную категорию: {category}");
+                    }
                 }
-                else
+                else if (state.StartsWith("awaiting_amount"))
                 {
-                    await botClient.SendTextMessageAsync(
-                        chatId: chatId,
-                        text: "Пожалуйста, введите число.",
-                        cancellationToken: cancellationToken);
+                    if (messageText == "Назад")
+                    {
+                        var transactionType = state.Split('_')[2]; // "income" или "expense"
+                        _userStates[chatId] = $"awaiting_category_{transactionType}";
+                        await botClient.SendTextMessageAsync(
+                            chatId: chatId,
+                            text: "Выберите категорию:",
+                            replyMarkup: GetCategoriesKeyboard(transactionType),
+                            cancellationToken: cancellationToken);
+                        return;
+                    }
 
-                    // Логируем ошибку ввода
-                    Log($"Ошибка: пользователь {chatId} ввёл не число.");
+                    if (decimal.TryParse(messageText, out var amount))
+                    {
+                        var parts = state.Split('_');
+                        var transactionType = parts[2]; // "income" или "expense"
+                        var category = parts[3];
+
+                        _transactions.Add(new Transaction
+                        {
+                            Type = transactionType == "income" ? "Income" : "Expense",
+                            Category = category,
+                            Amount = amount,
+                            Date = DateTime.Now
+                        });
+
+                        await botClient.SendTextMessageAsync(
+                            chatId: chatId,
+                            text: $"{(transactionType == "income" ? "Доход" : "Расход")} на сумму {amount} руб. (категория: {category}) добавлен.",
+                            replyMarkup: GetMainKeyboard(), // Возвращаем основную клавиатуру
+                            cancellationToken: cancellationToken);
+
+                        // Логируем добавление транзакции
+                        Log($"Добавлен {(transactionType == "income" ? "доход" : "расход")}: {amount} руб. (категория: {category}, пользователь: {chatId})");
+
+                        // Сбрасываем состояние
+                        _userStates.Remove(chatId);
+                    }
+                    else
+                    {
+                        await botClient.SendTextMessageAsync(
+                            chatId: chatId,
+                            text: "Пожалуйста, введите число.",
+                            cancellationToken: cancellationToken);
+
+                        // Логируем ошибку ввода
+                        Log($"Ошибка: пользователь {chatId} ввёл не число.");
+                    }
                 }
             }
             else
@@ -94,22 +155,15 @@ class Program
                 {
                     case "/start":
                     case "Меню":
-                        await botClient.SendTextMessageAsync(
-                            chatId: chatId,
-                            text: "Привет! Я бот для управления финансами. Выберите действие:",
-                            replyMarkup: GetMainKeyboard(), // Основная клавиатура
-                            cancellationToken: cancellationToken);
-
-                        // Логируем запуск бота
-                        Log($"Бот запущен для пользователя {chatId}.");
+                        await ShowMainMenu(chatId, cancellationToken);
                         break;
 
                     case "Добавить доход":
-                        _userStates[chatId] = "awaiting_income"; // Устанавливаем состояние
+                        _userStates[chatId] = "awaiting_category_income"; // Устанавливаем состояние
                         await botClient.SendTextMessageAsync(
                             chatId: chatId,
-                            text: "Введите сумму дохода:",
-                            replyMarkup: new ReplyKeyboardRemove(), // Убираем клавиатуру
+                            text: "Выберите категорию дохода:",
+                            replyMarkup: GetCategoriesKeyboard("income"), // Клавиатура с категориями доходов
                             cancellationToken: cancellationToken);
 
                         // Логируем запрос на добавление дохода
@@ -117,11 +171,11 @@ class Program
                         break;
 
                     case "Добавить расход":
-                        _userStates[chatId] = "awaiting_expense"; // Устанавливаем состояние
+                        _userStates[chatId] = "awaiting_category_expense"; // Устанавливаем состояние
                         await botClient.SendTextMessageAsync(
                             chatId: chatId,
-                            text: "Введите сумму расхода:",
-                            replyMarkup: new ReplyKeyboardRemove(), // Убираем клавиатуру
+                            text: "Выберите категорию расхода:",
+                            replyMarkup: GetCategoriesKeyboard("expense"), // Клавиатура с категориями расходов
                             cancellationToken: cancellationToken);
 
                         // Логируем запрос на добавление расхода
@@ -132,12 +186,12 @@ class Program
                         var balance = CalculateBalance();
                         await botClient.SendTextMessageAsync(
                             chatId: chatId,
-                            text: $"Ваш текущий баланс: {balance} руб.",
+                            text: $"Ваш текущий баланс:\n{balance}",
                             replyMarkup: GetMainKeyboard(), // Возвращаем основную клавиатуру
                             cancellationToken: cancellationToken);
 
                         // Логируем запрос баланса
-                        Log($"Пользователь {chatId} запросил баланс. Текущий баланс: {balance} руб.");
+                        Log($"Пользователь {chatId} запросил баланс.");
                         break;
 
                     case "Показать историю":
@@ -188,14 +242,36 @@ class Program
         return Task.CompletedTask;
     }
 
-    private static decimal CalculateBalance()
+    private static string CalculateBalance()
     {
-        return _transactions
+        var incomeByCategory = _transactions
             .Where(t => t.Type == "Income")
-            .Sum(t => t.Amount) -
-            _transactions
+            .GroupBy(t => t.Category)
+            .ToDictionary(g => g.Key, g => g.Sum(t => t.Amount));
+
+        var expenseByCategory = _transactions
             .Where(t => t.Type == "Expense")
-            .Sum(t => t.Amount);
+            .GroupBy(t => t.Category)
+            .ToDictionary(g => g.Key, g => g.Sum(t => t.Amount));
+
+        var totalIncome = incomeByCategory.Values.Sum();
+        var totalExpense = expenseByCategory.Values.Sum();
+        var balance = totalIncome - totalExpense;
+
+        var result = "Доходы по категориям:\n";
+        foreach (var category in incomeByCategory)
+        {
+            result += $"{category.Key}: {category.Value} руб.\n";
+        }
+
+        result += "\nРасходы по категориям:\n";
+        foreach (var category in expenseByCategory)
+        {
+            result += $"{category.Key}: {category.Value} руб.\n";
+        }
+
+        result += $"\nОбщий баланс: {balance} руб.";
+        return result;
     }
 
     private static string GetTransactionHistory()
@@ -206,7 +282,7 @@ class Program
         var history = "История операций:\n";
         foreach (var transaction in _transactions)
         {
-            history += $"{transaction.Date:dd.MM.yyyy HH:mm} - {transaction.Type}: {transaction.Amount} руб.\n";
+            history += $"{transaction.Date:dd.MM.yyyy HH:mm} - {transaction.Type} ({transaction.Category}): {transaction.Amount} руб.\n";
         }
         return history;
     }
@@ -227,6 +303,30 @@ class Program
         return keyboard;
     }
 
+    private static ReplyKeyboardMarkup GetCategoriesKeyboard(string type)
+    {
+        var categories = type == "income" ? IncomeCategories : ExpenseCategories;
+        var buttons = new List<KeyboardButton[]>();
+
+        foreach (var category in categories)
+        {
+            buttons.Add(new[] { new KeyboardButton(category) });
+        }
+        buttons.Add(new[] { new KeyboardButton("Назад"), new KeyboardButton("Меню") });
+
+        return new ReplyKeyboardMarkup(buttons) { ResizeKeyboard = true };
+    }
+
+    private static async Task ShowMainMenu(long chatId, CancellationToken cancellationToken)
+    {
+        _userStates.Remove(chatId);
+        await _botClient.SendTextMessageAsync(
+            chatId: chatId,
+            text: "Главное меню:",
+            replyMarkup: GetMainKeyboard(),
+            cancellationToken: cancellationToken);
+    }
+
     private static void Log(string message)
     {
         // Выводим лог на консоль с временной меткой
@@ -237,6 +337,7 @@ class Program
 public class Transaction
 {
     public string Type { get; set; } // "Income" или "Expense"
+    public string Category { get; set; } // Категория
     public decimal Amount { get; set; }
     public DateTime Date { get; set; }
 }
